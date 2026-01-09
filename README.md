@@ -1,6 +1,6 @@
 # Database Migration Tool
 
-An automated PostgreSQL database migration tool that intelligently compares schemas, detects changes, and migrates data with minimal manual intervention.
+An automated PostgresSQL database migration tool that intelligently compares schemas, detects changes, and migrates data with minimal manual intervention.
 
 ## Features
 
@@ -25,8 +25,8 @@ pip install psycopg2-binary
 
 ```
 /scripts
-  ├── db_migration_tool.py       # Schema analysis tool
-  ├── manual_resolutions.py      # Breaking change resolution generator
+  ├── db_migration_tool.py        # Schema analysis tool
+  ├── manual_resolutions.py       # Breaking change resolution generator
   └── data_migrator.py            # Data migration executor
 
 /config
@@ -182,6 +182,7 @@ Edit the generated file to specify how to handle each breaking change:
   - **lookup_table**: Lookup from reference table in new database
   - **default_value**: Fallback if mapping/lookup fails
 - `default` - Provide default value for new required columns
+  - Use `"USE_SCHEMA_DEFAULT"` to skip providing a value and let the database apply its schema default
 - `ignore` - Skip column (data will be lost)
 - `drop_table` - Exclude table from migration
 
@@ -392,6 +393,7 @@ WHERE p.category_name = c.name;
 - New nullable columns → Inserts NULL
 - New columns with defaults → Uses database default
 - New tables → Creates empty tables
+- JSON/JSONB columns → Automatically serializes Python dicts/lists to JSON strings
 
 ### Transformable Changes (Auto-converted)
 - Column renames (detected via similarity) → Maps data automatically
@@ -414,9 +416,16 @@ The tool automatically handles these PostgreSQL type conversions:
 | INTEGER | BIGINT, NUMERIC, REAL, DOUBLE PRECISION, TEXT |
 | BIGINT | NUMERIC, TEXT |
 | REAL | DOUBLE PRECISION, NUMERIC, TEXT |
+| DOUBLE PRECISION | NUMERIC, TEXT |
+| NUMERIC | TEXT |
 | VARCHAR | TEXT |
-| DATE | TIMESTAMP, TEXT |
+| CHARACTER | CHARACTER VARYING, TEXT |
+| DATE | TIMESTAMP WITHOUT TIME ZONE, TIMESTAMP WITH TIME ZONE, TEXT |
+| TIMESTAMP WITHOUT TIME ZONE | TIMESTAMP WITH TIME ZONE, TEXT |
 | BOOLEAN | TEXT |
+
+Additionally, the tool handles:
+- **JSON/JSONB columns**: Automatically converts Python dictionaries and lists to JSON strings during migration
 
 ## Best Practices
 
@@ -501,7 +510,7 @@ The tool automatically handles these PostgreSQL type conversions:
 
 ## Limitations
 
-- Currently supports PostgreSQL only
+- Currently supports PostgresSQL only
 - Text/JSON data only (no binary file uploads)
 - Does not handle:
   - Stored procedures
@@ -509,6 +518,7 @@ The tool automatically handles these PostgreSQL type conversions:
   - Views (only BASE TABLEs)
   - Sequences (except auto-increment columns)
   - Partitioned tables (migrates as regular tables)
+  - Custom SQL transform expressions (the `transform_sql` option is not yet implemented)
 
 ## Support
 
@@ -517,10 +527,6 @@ For issues or questions:
 2. Review migration logs in `/results`
 3. Verify database permissions and connectivity
 4. Test with minimal tables first to isolate issues
-
-## License
-
-[Add your license information here]
 
 ---
 
