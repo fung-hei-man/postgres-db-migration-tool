@@ -345,28 +345,52 @@ class SchemaAnalyzer:
 class MigrationOrchestrator:
     """Main orchestrator for migration analysis"""
 
-    def __init__(self, old_db_config: Dict, new_db_config: Dict, tables: Optional[List[str]] = None):
+    def __init__(self, old_db_config: Dict, new_db_config: Dict, tables: Optional[List[str]] = None,
+                 table_mapping: Optional[Dict[str, str]] = None):
         self.old_db_config = old_db_config
         self.new_db_config = new_db_config
         self.tables = tables
+        self.table_mapping = table_mapping or {}  # Map old table names to new table names
         self.analyzer = SchemaAnalyzer()
+
+    def get_new_table_name(self, old_table: str) -> str:
+        """Get the new table name (handles table renames)"""
+        return self.table_mapping.get(old_table, old_table)
 
     def analyze(self) -> Tuple[List[SchemaChange], bool]:
         """Analyze schema differences"""
         print("🔌 Connecting to OLD database...")
         old_extractor = PostgreSQLSchemaExtractor(**self.old_db_config)
 
-        tables_to_extract = self.tables
-        if tables_to_extract is None:
+        tables_to_extract_old = self.tables
+        if tables_to_extract_old is None:
             print("  No specific tables provided, scanning all tables in schema...")
 
-        old_schema = old_extractor.extract_schema(tables_to_extract)
+        old_schema = old_extractor.extract_schema(tables_to_extract_old)
         print(f"✓ Extracted schema for {len(old_schema)} tables from OLD database")
 
         print("\n🔌 Connecting to NEW database...")
         new_extractor = PostgreSQLSchemaExtractor(**self.new_db_config)
-        new_schema = new_extractor.extract_schema(tables_to_extract)
+
+        # For new database, extract using mapped table names
+        if self.table_mapping and tables_to_extract_old:
+            tables_to_extract_new = [self.get_new_table_name(t) for t in tables_to_extract_old]
+        else:
+            tables_to_extract_new = tables_to_extract_old
+
+        new_schema = new_extractor.extract_schema(tables_to_extract_new)
         print(f"✓ Extracted schema for {len(new_schema)} tables from NEW database")
+
+        # If table mapping exists, remap new_schema keys to match old table names for comparison
+        if self.table_mapping:
+            # Create reverse mapping: new_name -> old_name
+            reverse_mapping = {v: k for k, v in self.table_mapping.items()}
+            remapped_new_schema = {}
+            for table_name, columns in new_schema.items():
+                # Use old table name as key if this table was renamed
+                old_name = reverse_mapping.get(table_name, table_name)
+                remapped_new_schema[old_name] = columns
+            new_schema = remapped_new_schema
 
         print("\n🔍 Analyzing differences...")
         changes = self.analyzer.compare_schemas(old_schema, new_schema)
@@ -389,6 +413,11 @@ class MigrationOrchestrator:
             report.append(f"Tables Analyzed: {', '.join(self.tables)}")
         else:
             report.append("Tables Analyzed: ALL tables in schema")
+
+        if self.table_mapping:
+            report.append(f"Table Mappings: {len(self.table_mapping)} table(s) renamed")
+            for old_name, new_name in self.table_mapping.items():
+                report.append(f"  - {old_name} -> {new_name}")
 
         report.append("")
 
@@ -489,7 +518,8 @@ if __name__ == "__main__":
     orchestrator = MigrationOrchestrator(
         old_db_config=config['old_database'],
         new_db_config=config['new_database'],
-        tables=tables
+        tables=tables,
+        table_mapping=config.get('table_mapping')
     )
 
     print("\n" + "=" * 80)
@@ -522,3 +552,4 @@ if __name__ == "__main__":
     with open(json_file, "w") as f:
         json.dump(changes_json, f, indent=2)
     print(f"📄 Detailed changes saved to: {json_file}")
+

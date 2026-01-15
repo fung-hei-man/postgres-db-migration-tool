@@ -22,5 +22,9 @@
     "to",
     "be",
     "migrated"
-  ]
+  ],
+  "table_mapping": {
+    "_description": "Map old table names to new table names (for table renames)",
+    "old_table_name": "new_table_name"
+  }
 }

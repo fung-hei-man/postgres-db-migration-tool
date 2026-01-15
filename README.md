@@ -27,7 +27,8 @@ pip install psycopg2-binary
 /scripts
   ├── db_migration_tool.py        # Schema analysis tool
   ├── manual_resolutions.py       # Breaking change resolution generator
-  └── data_migrator.py            # Data migration executor
+  ├── data_migrator.py            # Data migration executor
+  └── generate_lookup_inserts.py  # Helper to generate SQL for missing lookup values
 
 /config
   └── migration-config.json       # Database connection configuration
@@ -65,13 +66,17 @@ Create `config/migration-config.json`:
     "schema": "public",
     "sslmode": "prefer"
   },
-  "tables": ["parent_table", "child_table", "orders"]
+  "tables": ["parent_table", "child_table", "orders"],
+  "table_mapping": {
+    "old_table_name": "new_table_name"
+  }
 }
 ```
 
 **Configuration Options:**
 
 - **tables**: (Optional) Specific tables to analyze/migrate. **Order matters for foreign key constraints** - list parent tables before child tables. Omit to scan all tables in alphabetical order.
+- **table_mapping**: (Optional) Map old table names to new table names for table renaming. Example: `{"old_table": "new_table"}`. See [Table Renaming](#table-renaming-table-mapping) for details.
 - **sslmode**: `disable`, `allow`, `prefer` (default), `require`
 - **schema**: PostgreSQL schema name (e.g., `public`, `dbo`)
 
@@ -186,6 +191,24 @@ Edit the generated file to specify how to handle each breaking change:
 - `ignore` - Skip column (data will be lost)
 - `drop_table` - Exclude table from migration
 
+#### Change Categories
+**Safe Changes (Auto-handled):**
+- New nullable columns → Inserts NULL
+- New columns with defaults → Uses database default
+- New tables → Creates empty tables
+- JSON/JSONB columns → Automatically serializes Python dicts/lists to JSON strings
+
+**Transformable Changes (Auto-converted):**
+- Column renames (detected via similarity) → Maps data automatically
+- Safe type conversions (e.g., INT→BIGINT) → Automatic casting
+- VARCHAR expansions → Direct copy
+
+**Breaking Changes (Manual intervention required):**
+- Incompatible type changes → Need custom transformation
+- New NOT NULL columns without defaults → Need default value
+- Removed columns → Need confirmation to ignore
+- VARCHAR→VARCHAR with size reduction → Potential data loss
+
 #### Validate Resolutions
 
 ```bash
@@ -296,6 +319,60 @@ python scripts/data_migrator.py config/prod-config.json --prefix prod --live
 
 ## Advanced Features
 
+### Table Renaming (Table Mapping)
+
+**Problem:** Table names differ between old and new databases (e.g., `users` → `app_users`).
+
+**Solution:** Add `table_mapping` to your config file:
+
+```json
+{
+  "old_database": { ... },
+  "new_database": { ... },
+  "tables": ["users"],
+  "table_mapping": {
+    "users": "app_users"
+  }
+}
+```
+
+**How it works:**
+1. **Schema Analysis** - Compares `old_database.users` with `new_database.app_users`
+2. **Data Migration** - Reads from `users`, writes to `app_users`
+3. **Column mappings** still work using the old table name in resolutions
+
+**Example Output:**
+```
+================================================================================
+DATABASE MIGRATION ANALYSIS REPORT
+================================================================================
+Tables Analyzed: scheduler_event
+Table Mappings: 1 table(s) renamed
+  - users -> app_users
+
+Total Changes: 0
+  - Safe (auto-handled): 0
+  - Transformable (auto-converted): 0
+  - Breaking (manual required): 0
+
+✅ MIGRATION CAN PROCEED AUTOMATICALLY
+================================================================================
+```
+
+During migration:
+```
+[DRY RUN] Migrating table: users -> app_users
+  Old columns: 8, New columns: 8
+  Total rows to migrate: 150
+  ✓ Processed: 150, Success: 150, Failed: 0
+```
+
+**Notes:**
+- List the **old table name** in the `tables` array
+- The `table_mapping` specifies `old_name` → `new_name`
+- Manual resolutions still reference the **old table name**
+- Can be combined with column renames and transformations
+
 ### Foreign Key Constraint Handling
 
 **Problem:** Child tables with foreign keys fail if parent table isn't migrated first.
@@ -389,24 +466,6 @@ FROM categories c
 WHERE p.category_name = c.name;
 ```
 
-### Safe Changes (Auto-handled)
-- New nullable columns → Inserts NULL
-- New columns with defaults → Uses database default
-- New tables → Creates empty tables
-- JSON/JSONB columns → Automatically serializes Python dicts/lists to JSON strings
-
-### Transformable Changes (Auto-converted)
-- Column renames (detected via similarity) → Maps data automatically
-- Safe type conversions (e.g., INT→BIGINT) → Automatic casting
-- VARCHAR expansions → Direct copy
-
-### Breaking Changes (Manual intervention required)
-- Incompatible type changes → Need custom transformation
-- New NOT NULL columns without defaults → Need default value
-- Removed columns → Need confirmation to ignore
-- VARCHAR→VARCHAR with size reduction → Potential data loss
-
-## Automatic Type Conversions
 ### Generating SQL for Missing Lookup Values
 
 **Problem:** After a dry run migration, the result file contains errors like:
@@ -463,6 +522,8 @@ INSERT INTO attribute_key (attribute_key) VALUES ('MQTT Broker Connector');
 4. Execute the SQL against the new database to populate missing lookup values
 5. Re-run the dry run migration to verify errors are resolved
 
+
+## Automatic Type Conversions
 
 The tool automatically handles these PostgreSQL type conversions:
 

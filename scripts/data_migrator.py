@@ -16,19 +16,25 @@ class DataMigrator:
 
     def __init__(self, old_db_config: Dict, new_db_config: Dict,
                  changes: List[Dict], resolutions: Optional[Dict] = None,
-                 batch_size: int = 1000, table_order: Optional[List[str]] = None):
+                 batch_size: int = 1000, table_order: Optional[List[str]] = None,
+                 table_mapping: Optional[Dict[str, str]] = None):
         self.old_db_config = old_db_config
         self.new_db_config = new_db_config
         self.changes = changes
         self.resolutions = resolutions or {'resolutions': {}}
         self.batch_size = batch_size
         self.table_order = table_order  # For foreign key constraint ordering
+        self.table_mapping = table_mapping or {}  # Map old table names to new table names
         self.stats = {
             'tables_processed': 0,
             'rows_migrated': 0,
             'rows_failed': 0,
             'errors': []
         }
+
+    def get_new_table_name(self, old_table: str) -> str:
+        """Get the new table name (handles table renames)"""
+        return self.table_mapping.get(old_table, old_table)
 
     def get_resolutions_for_table(self, table: str) -> List[Dict]:
         """Get manual resolutions for a specific table"""
@@ -200,61 +206,48 @@ class DataMigrator:
                    'not in new DB' in change.get('description', '')):
                 tables_from_changes.add(table)
 
-        # If tables were specified in config, use that order
-        # This is critical for foreign key constraints
+        # If tables were specified in config (table_order), use those tables
+        # This handles the case where schemas are identical (no changes detected)
         if hasattr(self, 'table_order') and self.table_order:
             print("  Using table order from config (important for foreign keys)")
             for table in self.table_order:
-                if table in tables_from_changes and table not in dropped_tables:
+                if table not in dropped_tables:
                     tables_list.append(table)
-            # Add any remaining tables not in config order
-            for table in sorted(tables_from_changes):
-                if table not in tables_list:
-                    tables_list.append(table)
-        # If no changes detected (identical schemas), get all tables from old DB
-        elif len(tables_from_changes) == 0:
-            print("  No schema changes detected - will migrate all tables")
-            try:
-                old_conn = psycopg2.connect(
-                    host=self.old_db_config['host'],
-                    port=self.old_db_config['port'],
-                    database=self.old_db_config['database'],
-                    user=self.old_db_config['username'],
-                    password=self.old_db_config['password'],
-                    sslmode=self.old_db_config.get('sslmode', 'prefer')
-                )
-                cursor = old_conn.cursor()
+            return tables_list
 
-                query = """
-                    SELECT table_name 
-                    FROM information_schema.tables 
-                    WHERE table_schema = %s 
-                    AND table_type = 'BASE TABLE'
-                    ORDER BY table_name
-                """
-                cursor.execute(query, (self.old_db_config['schema'],))
-                all_tables = [row[0] for row in cursor.fetchall()]
-
-                cursor.close()
-                old_conn.close()
-
-                # Respect config order if provided
-                if hasattr(self, 'table_order') and self.table_order:
-                    print("  Using table order from config (important for foreign keys)")
-                    for table in self.table_order:
-                        if table in all_tables:
-                            tables_list.append(table)
-                    # Add remaining tables
-                    for table in all_tables:
-                        if table not in tables_list:
-                            tables_list.append(table)
-                else:
-                    tables_list = all_tables
-
-            except Exception as e:
-                print(f"  ⚠ Error fetching tables: {e}")
-        else:
+        # If we have changes, use the tables from changes
+        if tables_from_changes:
             tables_list = sorted(list(tables_from_changes))
+            return tables_list
+
+        # If no changes and no table_order specified, get all tables from old DB
+        print("  No schema changes detected and no tables specified - will migrate all tables")
+        try:
+            old_conn = psycopg2.connect(
+                host=self.old_db_config['host'],
+                port=self.old_db_config['port'],
+                database=self.old_db_config['database'],
+                user=self.old_db_config['username'],
+                password=self.old_db_config['password'],
+                sslmode=self.old_db_config.get('sslmode', 'prefer')
+            )
+            cursor = old_conn.cursor()
+
+            query = """
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = %s 
+                AND table_type = 'BASE TABLE'
+                ORDER BY table_name
+            """
+            cursor.execute(query, (self.old_db_config['schema'],))
+            tables_list = [row[0] for row in cursor.fetchall()]
+
+            cursor.close()
+            old_conn.close()
+
+        except Exception as e:
+            print(f"  ⚠ Error fetching tables: {e}")
 
         return tables_list
 
@@ -379,10 +372,17 @@ class DataMigrator:
 
     def migrate_table(self, table: str, dry_run: bool = True) -> Dict:
         """Migrate data for a single table"""
-        print(f"\n{'[DRY RUN] ' if dry_run else ''}Migrating table: {table}")
+        # Get the target table name (handles table renames)
+        new_table = self.get_new_table_name(table)
+
+        if new_table != table:
+            print(f"\n{'[DRY RUN] ' if dry_run else ''}Migrating table: {table} -> {new_table}")
+        else:
+            print(f"\n{'[DRY RUN] ' if dry_run else ''}Migrating table: {table}")
 
         result = {
             'table': table,
+            'new_table': new_table,
             'rows_migrated': 0,
             'rows_failed': 0,
             'errors': []
@@ -392,9 +392,9 @@ class DataMigrator:
         lookup_caches = {}
 
         try:
-            # Get schemas
+            # Get schemas - use old table for source, new table for destination
             old_columns = self.fetch_old_schema(table)
-            new_schema = self.fetch_new_schema(table)
+            new_schema = self.fetch_new_schema(new_table)
             column_mapping = self.build_column_mapping(table)
 
             print(f"  Old columns: {len(old_columns)}, New columns: {len(new_schema)}")
@@ -420,14 +420,14 @@ class DataMigrator:
             old_cursor = old_conn.cursor()
             new_cursor = new_conn.cursor()
 
-            # Count total rows
+            # Count total rows from old table
             schema_prefix = f"{self.old_db_config['schema']}." if self.old_db_config['schema'] else ""
             count_query = f"SELECT COUNT(*) FROM {schema_prefix}{table}"
             old_cursor.execute(count_query)
             total_rows = old_cursor.fetchone()[0]
             print(f"  Total rows to migrate: {total_rows}")
 
-            # Fetch data in batches
+            # Fetch data in batches from old table
             select_query = f"SELECT * FROM {schema_prefix}{table}"
             old_cursor.execute(select_query)
 
@@ -444,14 +444,14 @@ class DataMigrator:
                         new_row = self.transform_row(old_row, column_mapping, new_schema, table, lookup_caches)
 
                         if not dry_run:
-                            # Insert into new database
+                            # Insert into new database (using new_table name)
                             cols = list(new_row.keys())
                             values = [new_row[col] for col in cols]
 
                             placeholders = ', '.join(['%s'] * len(cols))
                             col_names = ', '.join(cols)
                             insert_query = f"""
-                                INSERT INTO {self.new_db_config['schema']}.{table} 
+                                INSERT INTO {self.new_db_config['schema']}.{new_table}
                                 ({col_names}) VALUES ({placeholders})
                             """
                             new_cursor.execute(insert_query, values)
@@ -643,7 +643,8 @@ if __name__ == "__main__":
         changes=changes,
         resolutions=resolutions,
         batch_size=batch_size,
-        table_order=config.get('tables')  # Preserve table order for foreign keys
+        table_order=config.get('tables'),  # Preserve table order for foreign keys
+        table_mapping=config.get('table_mapping')  # Map old table names to new table names
     )
 
     # Execute migration
@@ -658,4 +659,3 @@ if __name__ == "__main__":
 
     if dry_run:
         print("\n💡 To execute actual migration, run with --live flag")
-
